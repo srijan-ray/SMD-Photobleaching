@@ -1,0 +1,12 @@
+[project]
+name = "smd-photobleaching"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.5",
+    "pandas>=3.0.3",
+    "ruptures>=1.1.10",
+    "tqdm>=4.67.3",
+]
