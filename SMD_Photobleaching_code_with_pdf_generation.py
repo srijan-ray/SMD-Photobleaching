@@ -15,6 +15,7 @@ from matplotlib.backends.backend_pdf import PdfPages as pltPdf
 input_directory = "./path/to/your/raw_csv_folder"  # Directory containing the TXT files
 output_csv = "Comprehensive_Photobleaching_Results.csv"
 output_pdf = "Comprehensive_Photobleaching_Plots.pdf"
+output_smooth = "Comprehensive_SmoothData.csv"  # NEW: Output for the full step-fits
 
 MAX_BREAKPOINTS = 15
 BREAKPOINTS = range(4, MAX_BREAKPOINTS + 1)
@@ -28,23 +29,19 @@ METHODS_OTHER = ["Binseg", "BottomUp", "Dynp"]
 MODELS_OTHER = ["rbf", "l1"]
 # ==========================================
 
-# 1. Grab all TXT files in the target directory
 raw_files = glob.glob(os.path.join(input_directory, "*.txt"))
 print(f"Found {len(raw_files)} files. Starting batch processing...")
 
-# Turn off interactive plotting so Jupyter doesn't crash from drawing hundreds of plots
 plt.ioff()
 
 all_results_dfs = []
+all_overlays_dfs = []  # NEW: Container for the full overlay step data
 
-# 2. Open the comprehensive PDF file
 with pltPdf(output_pdf) as pdfFig:
 
-    # 3. Loop through every file
     for fname in tqdm(raw_files, desc="Overall Progress"):
         handle = os.path.basename(fname).split(".")[0]
 
-        # Safely load the data (adjust sep='\t' or sep=',' depending on your txt format)
         try:
             signal = pd.read_csv(fname, sep="\t")
             signal.columns = ["ts", "val"]
@@ -55,17 +52,15 @@ with pltPdf(output_pdf) as pdfFig:
 
         cps_ls = []
 
-        # --- WINDOW METHOD ---
+        # --- RUPTURES METHODS ---
         for m, w, b in product(MODELS_WINDOW, WINDOW_SIZES, BREAKPOINTS):
             cps = rpt.Window(width=w, min_size=2, jump=1).fit_predict(X, n_bkps=b)
             cps_ls.extend(cps[:-1])
 
-        # --- PELT METHOD ---
         for m, p in product(MODELS_PELT, PENALTIES):
             cps = rpt.Pelt(model=m, min_size=2, jump=1).fit_predict(X, pen=p)
             cps_ls.extend(cps[:-1])
 
-        # --- OTHER METHODS ---
         for method in METHODS_OTHER:
             for m, b in product(MODELS_OTHER, BREAKPOINTS):
                 if method == "Binseg":
@@ -125,48 +120,66 @@ with pltPdf(output_pdf) as pdfFig:
         )
         all_results_dfs.append(file_df)
 
-        # --- GENERATE PLOTS FOR THE PDF ---
+        # --- GENERATE PLOTS & SMOOTH DATA OVERLAY ---
+        # We only need one high-res overlay array per file, so we generate it
+        # based on the max breakpoints (MAX_BREAKPOINTS).
+        top_n_plot = dict(cps_fq.most_common(MAX_BREAKPOINTS))
+
+        overlay = list()
+        prev_plot = 0
+        for ix in sorted(list(top_n_plot.keys())):
+            overlay.extend([np.mean(signal.val[prev_plot:ix])] * (ix - prev_plot))
+            prev_plot = ix
+        overlay.extend([np.mean(signal.val[ix:])] * (len(signal.val) - ix))
+
+        # NEW: Save this file's full high-res step array to our list
+        file_overlay_df = pd.DataFrame(
+            {
+                "Source_File": handle,
+                "Timestamp": signal.ts,
+                "Original_Signal": signal.val,
+                "Step_Fit_Overlay": overlay,
+            }
+        )
+        all_overlays_dfs.append(file_overlay_df)
+
+        # Generate the PDF plots just like before
         for n in BREAKPOINTS:
-            # select top N changepoints
-            top_n_plot = dict(cps_fq.most_common(n))
-
-            # Create a new figure
+            top_n_sub = dict(cps_fq.most_common(n))
             plt.figure(figsize=(30, 4))
-
-            # I added the filename [handle] to the title so you know which file this is!
             plt.title(f"File: {handle} | Significant {n} Change-Points")
             plt.xlabel("Time (sec)")
             plt.ylabel("Intensity (unit/sec)")
             plt.margins(0)
 
-            # plot original signal
             plt.plot(signal.ts, signal.val, label="Signal")
 
-            # overlay averaged signal values
-            overlay = list()
-            prev_plot = 0
-            for ix in sorted(list(top_n_plot.keys())):
+            sub_overlay = list()
+            sub_prev = 0
+            for ix in sorted(list(top_n_sub.keys())):
                 plt.axvline(x=signal.ts[ix], color="g")
-                overlay.extend([np.mean(signal.val[prev_plot:ix])] * (ix - prev_plot))
-                prev_plot = ix
-            overlay.extend([np.mean(signal.val[ix:])] * (len(signal.val) - ix))
+                sub_overlay.extend([np.mean(signal.val[sub_prev:ix])] * (ix - sub_prev))
+                sub_prev = ix
+            sub_overlay.extend([np.mean(signal.val[ix:])] * (len(signal.val) - ix))
 
-            # plot overlay
-            plt.plot(signal.ts, overlay, color="k", label="Averaged Signal")
+            plt.plot(signal.ts, sub_overlay, color="k", label="Averaged Signal")
             plt.legend()
-
-            # Save the figure to the comprehensive PDF
             pdfFig.savefig()
-
-            # Close the figure to free up system memory
             plt.close()
 
 # 4. Combine CSV data and export
 if all_results_dfs:
+    # Export Summary CSV
     comprehensive_df = pd.concat(all_results_dfs, ignore_index=True)
     comprehensive_df.to_csv(output_csv, index=False)
+
+    # Export Smooth Data Overlay CSV
+    comprehensive_overlay_df = pd.concat(all_overlays_dfs, ignore_index=True)
+    comprehensive_overlay_df.to_csv(output_smooth, index=False)
+
     print(f"\nSuccess! Analyzed {len(all_results_dfs)} files.")
-    print(f"Data saved to: {output_csv}")
+    print(f"Summary Results saved to: {output_csv}")
+    print(f"High-Res Step Fits saved to: {output_smooth}")
     print(f"Plots saved to: {output_pdf}")
 else:
     print("\nNo results generated. Check your directory path and file formats.")
